@@ -1,0 +1,11 @@
+{
+  "name": "webds-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "serve": "npx http-server -c-1 -p 8080"
+  },
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  }
+}

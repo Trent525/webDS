@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>webDS — melonDS WASM frontend</title>
+  <link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+  <header>
+    <h1>webDS</h1>
+    <p>Front-end to run a melonDS WebAssembly build. You must provide the built emulator and any BIOS/ROM files.</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <div>
+        <label for="file-rom">ROM (.nds)</label>
+        <input id="file-rom" type="file" accept=".nds" />
+      </div>
+      <div>
+        <label for="file-bios7">BIOS ARM7 (optional)</label>
+        <input id="file-bios7" type="file" accept="*" />
+      </div>
+      <div>
+        <label for="file-bios9">BIOS ARM9 (optional)</label>
+        <input id="file-bios9" type="file" accept="*" />
+      </div>
+      <div class="buttons">
+        <button id="btn-start">Start</button>
+        <button id="btn-pause">Pause</button>
+        <button id="btn-reset">Reset</button>
+      </div>
+      <div id="status" class="status">Emulator not loaded</div>
+    </section>
+
+    <section class="screens">
+      <div class="screen-wrapper">
+        <canvas id="screen-top" width="256" height="192"></canvas>
+        <div class="screen-label">Top</div>
+      </div>
+      <div class="screen-wrapper">
+        <canvas id="screen-bottom" width="256" height="192"></canvas>
+        <div class="screen-label">Bottom (touch)</div>
+      </div>
+    </section>
+
+    <section class="instructions">
+      <h2>How to use</h2>
+      <ol>
+        <li>Build melonDS to WebAssembly (see README) and place the generated files in <code>static/emu/</code>. Required files: <code>melonDS.js</code>, <code>melonDS.wasm</code> (names depend on your Emscripten build output).</li>
+        <li>Open this page served from a local server (do not use file://). Use <code>npm run serve</code> to start a dev server.</li>
+        <li>Load a .nds ROM and any BIOS files you have dumped from your own hardware. Click Start.</li>
+      </ol>
+      <p><strong>Legal:</strong> This project does not include any BIOS, firmware, or commercial ROMs. Do not download copyrighted BIOS/ROMs from the internet.</p>
+    </section>
+  </main>
+
+  <script src="static/js/main.js"></script>
+</body>
+</html>
