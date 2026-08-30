@@ -1,6 +1,5 @@
-// main.js — improved frontend loader and ROM loader for melonDS WebAssembly build
-// This version more robustly loads the Emscripten glue, waits for runtime initialization,
-// writes ROM/BIOS into the Emscripten FS, and calls the emulator entrypoint.
+// main.js — improved loader supporting both modularized (factory) and global Module melonDS builds
+// Works with melonDS.js + melonDS.wasm placed in static/emu/
 
 (function () {
   const statusEl = document.getElementById('status');
@@ -15,75 +14,12 @@
   const canvasTop = document.getElementById('screen-top');
   const canvasBottom = document.getElementById('screen-bottom');
 
-  let Module = null; // the initialized Emscripten module instance
   let romBuffer = null;
   let bios7 = null;
   let bios9 = null;
+  let runningModule = null;
 
   function setStatus(s) { statusEl.textContent = s; }
-
-  function loadScript(src) {
-    return new Promise((resolve, reject) => {
-      // Don't load the same script twice
-      if (document.querySelector(`script[src="${src}"]`)) return resolve();
-      const s = document.createElement('script');
-      s.src = src;
-      s.onload = () => resolve();
-      s.onerror = (e) => reject(new Error('Failed to load ' + src));
-      document.head.appendChild(s);
-    });
-  }
-
-  async function findAndInstantiateModule(jsPath = 'static/emu/melonDS.js') {
-    // Try to load glue script (if present) then instantiate the Module in multiple ways
-    try {
-      await loadScript(jsPath);
-    } catch (e) {
-      // If the script doesn't exist, keep going; maybe the user already added it or uses a different name.
-      console.warn('Could not load glue script at', jsPath, e);
-    }
-
-    // Factory names commonly used by Emscripten builds
-    const factoryNames = [
-      'createMelonDSModule',
-      'createModule',
-      'ModuleFactory'
-    ];
-
-    // If a factory function exists, call it and await the instance
-    for (const name of factoryNames) {
-      const factory = window[name];
-      if (typeof factory === 'function') {
-        setStatus(`Found factory ${name}(); instantiating...`);
-        const inst = factory();
-        // factory might return a Promise or a Module object
-        const moduleObj = await Promise.resolve(inst);
-        // Wait for runtime init if needed
-        if (moduleObj.calledRun) return moduleObj;
-        await new Promise((resolve) => {
-          moduleObj.onRuntimeInitialized = resolve;
-        });
-        return moduleObj;
-      }
-    }
-
-    // If a global Module object already exists
-    if (window.Module && typeof window.Module === 'object') {
-      const mod = window.Module;
-      // Let the caller attach canvas before runtime init if desired
-      if (mod.calledRun) return mod;
-      return await new Promise((resolve) => {
-        // Respect any existing onRuntimeInitialized
-        const prev = mod.onRuntimeInitialized;
-        mod.onRuntimeInitialized = function () {
-          if (typeof prev === 'function') try { prev(); } catch (e) { console.warn(e); }
-          resolve(mod);
-        };
-      });
-    }
-
-    throw new Error('No Emscripten Module or factory found. Build melonDS with Emscripten and place the JS/WASM in static/emu/');
-  }
 
   function readFileInput(input) {
     return new Promise((resolve) => {
@@ -108,155 +44,189 @@
     setStatus(bios9 ? 'BIOS ARM9 loaded' : '');
   });
 
-  async function ensureModuleReady() {
-    if (Module) return Module;
-    setStatus('Initializing emulator module...');
+  // Try HEAD first to avoid adding script tags that 404
+  async function exists(path) {
+    try {
+      const r = await fetch(path, { method: 'HEAD' });
+      return r.ok;
+    } catch (e) { return false; }
+  }
+
+  function addScript(src) {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${src}"]`)) return resolve();
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = () => resolve();
+      s.onerror = (e) => reject(new Error('Failed to load ' + src));
+      document.head.appendChild(s);
+    });
+  }
+
+  // Create a preRun function that writes the ROM/BIOS into Module.FS when runtime initializes
+  function makePreRun(romBuf, b7, b9) {
+    return function () {
+      try { if (!Module.FS.analyzePath('/roms').exists) Module.FS.mkdir('/roms'); } catch (e) { }
+      try {
+        if (romBuf) Module.FS.writeFile('/roms/game.nds', new Uint8Array(romBuf), { canRead: true, canWrite: true });
+        if (b7) Module.FS.writeFile('/roms/bios7.bin', new Uint8Array(b7), { canRead: true, canWrite: true });
+        if (b9) Module.FS.writeFile('/roms/bios9.bin', new Uint8Array(b9), { canRead: true, canWrite: true });
+      } catch (e) { console.error('preRun writeFile error', e); }
+    };
+  }
+
+  async function launchWithFactory(factory, romBuf, b7, b9) {
+    setStatus('Instantiating melonDS (factory) and launching...');
+    const preRun = makePreRun(romBuf, b7, b9);
+    const Module = await factory({
+      locateFile: (path) => `static/emu/${path}`,
+      preRun: [preRun],
+      canvas: canvasTop,
+      arguments: ['/roms/game.nds']
+    });
 
     try {
-      Module = await findAndInstantiateModule();
-    } catch (err) {
-      console.error(err);
-      setStatus('Emulator build not found or failed to instantiate. See console.');
-      throw err;
+      if (typeof Module.callMain === 'function') {
+        Module.callMain(['/roms/game.nds']);
+      } else {
+        setStatus('Module instantiated (factory) — callMain not found; emulator may have started automatically. Check console.');
+      }
+    } catch (e) {
+      console.error('Error calling callMain', e);
+      setStatus('Error launching emulator (see console)');
     }
-
-    // If the build uses SDL2 and expects a canvas, tell it which canvas to use.
-    // Some builds create their own canvas; setting Module['canvas'] helps Emscripten/SDL pick it up.
-    try {
-      if (!Module['canvas']) Module['canvas'] = canvasTop;
-    } catch (e) { console.warn(e); }
-
-    setStatus('Emulator runtime initialized.');
     return Module;
   }
 
-  btnStart.addEventListener('click', async () => {
-    setStatus('Starting...');
-    try {
-      await ensureModuleReady();
-    } catch (e) { return; }
+  function setGlobalModuleAndLoad(jsPath, romBuf, b7, b9) {
+    return new Promise(async (resolve, reject) => {
+      setStatus('Preparing global Module config and loading melonDS.js...');
 
-    if (!romBuffer) { setStatus('Please choose a .nds ROM first'); return; }
+      // Create Module config expected by non-modularized builds
+      const preRun = function () {
+        try { if (!Module.FS.analyzePath('/roms').exists) Module.FS.mkdir('/roms'); } catch (e) { }
+        try {
+          if (romBuf) Module.FS.writeFile('/roms/game.nds', new Uint8Array(romBuf), { canRead: true, canWrite: true });
+          if (b7) Module.FS.writeFile('/roms/bios7.bin', new Uint8Array(b7), { canRead: true, canWrite: true });
+          if (b9) Module.FS.writeFile('/roms/bios9.bin', new Uint8Array(b9), { canRead: true, canWrite: true });
+        } catch (e) { console.error('preRun writeFile error (global)', e); }
+      };
 
-    // Ensure FS exists and write files
-    if (!Module.FS) {
-      setStatus('Emulator FS not available on Module. Build with Emscripten FS enabled.');
+      // If a Module already exists on window, we will try to reuse it by appending preRun
+      if (window.Module && typeof window.Module === 'object') {
+        try {
+          window.Module.preRun = window.Module.preRun || [];
+          window.Module.preRun.push(preRun);
+          window.Module.locateFile = window.Module.locateFile || ((p) => `static/emu/${p}`);
+          window.Module.canvas = window.Module.canvas || canvasTop;
+        } catch (e) { console.warn('Failed to attach to existing global Module config', e); }
+      } else {
+        window.Module = {
+          preRun: [preRun],
+          locateFile: (p) => `static/emu/${p}`,
+          canvas: canvasTop,
+          arguments: ['/roms/game.nds']
+        };
+      }
+
+      try {
+        await addScript(jsPath);
+      } catch (e) {
+        console.error('Loading melonDS.js failed', e);
+        return reject(e);
+      }
+
+      // Wait for runtime init if Module.onRuntimeInitialized is used
+      // If script created a factory instead, we'll detect that outside
+      const checkInterval = setInterval(() => {
+        // If modularized factory appeared, bail out (factory path will handle launching)
+        const factory = window.createMelonDSModule || window.createModule || window.createMelonDS || window.ModuleFactory;
+        if (factory && typeof factory === 'function') {
+          clearInterval(checkInterval);
+          return resolve({ type: 'factoryAppeared' });
+        }
+        if (window.Module && window.Module.calledRun) {
+          clearInterval(checkInterval);
+          return resolve({ type: 'globalModuleReady', module: window.Module });
+        }
+      }, 200);
+
+      // Timeout after 10s
+      setTimeout(() => {
+        clearInterval(checkInterval);
+        resolve({ type: 'unknown' });
+      }, 10000);
+    });
+  }
+
+  async function startEmulator(romBuf, b7, b9) {
+    const jsPath = 'static/emu/melonDS.js';
+    const jsExists = await exists(jsPath);
+    if (!jsExists) { setStatus('melonDS.js not found in static/emu/. Place melonDS.js/.wasm there and retry.'); return; }
+
+    // Heuristic: if factory already exists on window, use it
+    const factory = window.createMelonDSModule || window.createModule || window.createMelonDS || window.ModuleFactory || null;
+    if (factory && typeof factory === 'function') {
+      runningModule = await launchWithFactory(factory, romBuf, b7, b9);
+      setStatus('Emulator launched via factory.');
       return;
     }
 
+    // Otherwise set up global Module and load the script
     try {
-      // Create a roms directory
-      try { Module.FS.mkdir('/roms'); } catch (e) { /* ignore if exists */ }
-
-      // Convert ArrayBuffer to Uint8Array
-      const romU8 = romBuffer instanceof Uint8Array ? romBuffer : new Uint8Array(romBuffer);
-      Module.FS.writeFile('/roms/game.nds', romU8, { canRead: true, canWrite: true });
-      setStatus('ROM written to /roms/game.nds');
-
-      if (bios7) {
-        const b7 = bios7 instanceof Uint8Array ? bios7 : new Uint8Array(bios7);
-        Module.FS.writeFile('/roms/bios7.bin', b7, { canRead: true, canWrite: true });
-        setStatus('ARM7 BIOS written to /roms/bios7.bin');
-      }
-      if (bios9) {
-        const b9 = bios9 instanceof Uint8Array ? bios9 : new Uint8Array(bios9);
-        Module.FS.writeFile('/roms/bios9.bin', b9, { canRead: true, canWrite: true });
-        setStatus('ARM9 BIOS written to /roms/bios9.bin');
-      }
-
-      // Attempt to launch. Different melonDS builds might expect different args or a different entrypoint.
-      // callMain is the generic entrypoint. If melonDS compiled as a standalone binary, callMain(['/roms/game.nds']) should work.
-      if (typeof Module.callMain === 'function') {
-        setStatus('Calling Module.callMain with /roms/game.nds. Emulator will take over the page.');
-        try {
-          Module.callMain(['/roms/game.nds']);
-          // callMain may not return if it enters the main loop; we can't update status after that in many builds.
-        } catch (e) {
-          console.error('callMain failed', e);
-          setStatus('Module.callMain threw an error. See console.');
+      const res = await setGlobalModuleAndLoad(jsPath, romBuf, b7, b9);
+      if (res && res.type === 'factoryAppeared') {
+        // A factory appeared after loading the script (modularized build) — use it
+        const factory2 = window.createMelonDSModule || window.createModule || window.createMelonDS || window.ModuleFactory;
+        if (factory2 && typeof factory2 === 'function') {
+          runningModule = await launchWithFactory(factory2, romBuf, b7, b9);
+          setStatus('Emulator launched via factory (post-load).');
+          return;
         }
-      } else if (typeof Module._main === 'function') {
-        // attempt to call C main via pointer
-        try {
-          // Simple approach: Module._main expects argc/argv; building proper argv in the heap is complex.
-          // If you need this path, it's better to compile melonDS so Module.callMain is available.
-          Module._main(1, 0);
-        } catch (e) {
-          console.error('Module._main failed', e);
-          setStatus('Module._main threw an error. See console.');
-        }
-      } else {
-        setStatus('No entrypoint (callMain/_main) found on Module. Check melonDS build options.');
       }
-
-    } catch (err) {
-      console.error('Failed to write files or start emulator', err);
-      setStatus('Failed to start emulator. See console.');
+      if (res && res.type === 'globalModuleReady') {
+        runningModule = res.module;
+        setStatus('Emulator started (global Module).');
+        return;
+      }
+      setStatus('Loaded melonDS.js but could not detect runtime start. Check console.');
+    } catch (e) {
+      console.error(e);
+      setStatus('Failed to load or start melonDS.js (see console)');
     }
+  }
+
+  btnStart.addEventListener('click', async () => {
+    if (!romBuffer) { setStatus('Please select a .nds ROM first'); return; }
+    if (runningModule) { setStatus('Emulator already running'); return; }
+    await startEmulator(romBuffer, bios7, bios9);
   });
 
   btnPause.addEventListener('click', () => {
-    if (!Module) { setStatus('Module not running'); return; }
-    // Pause API varies by build. Try common functions if present.
-    if (Module._emu_pause) {
-      try { Module._emu_pause(); setStatus('Toggled pause via _emu_pause()'); } catch (e) { setStatus('Pause failed'); }
-    } else {
-      setStatus('Pause API not available for this build');
-    }
+    if (!runningModule) { setStatus('Module not running'); return; }
+    if (runningModule.ccall) {
+      try { runningModule.ccall('emu_pause', 'void', [], []); setStatus('Pause attempted'); } catch (e) { setStatus('Pause not available'); }
+    } else setStatus('Pause API not available');
   });
 
   btnReset.addEventListener('click', () => {
-    if (!Module) { setStatus('Module not running'); return; }
-    if (typeof Module.callMain === 'function') {
-      try { Module.callMain([]); setStatus('callMain([]) invoked (may reset emulator)'); } catch (e) { setStatus('Reset failed'); }
-    } else {
-      setStatus('Reset not available for this build');
-    }
+    if (!runningModule) { setStatus('Module not running'); return; }
+    if (runningModule.callMain) { try { runningModule.callMain([]); setStatus('Reset attempted'); } catch (e) { setStatus('Reset failed'); } }
+    else setStatus('Reset API not available');
   });
 
-  // Bottom-screen click -> forward as a simple touch event if API available
+  // Basic touch logging
   canvasBottom.addEventListener('click', (ev) => {
-    if (!Module) return;
     const r = canvasBottom.getBoundingClientRect();
     const x = Math.floor((ev.clientX - r.left) * (canvasBottom.width / r.width));
     const y = Math.floor((ev.clientY - r.top) * (canvasBottom.height / r.height));
     setStatus(`Touch at ${x},${y}`);
-    // If the module exposes a touch function, try to call it. Common names vary.
-    if (typeof Module._onTouch === 'function') {
-      try { Module._onTouch(x, y); } catch (e) { console.warn(e); }
-    }
   });
 
-  // Basic keyboard mapping — forward to C functions if exposed
-  const keyMap = {
-    'ArrowUp': 'UP', 'ArrowDown': 'DOWN', 'ArrowLeft': 'LEFT', 'ArrowRight': 'RIGHT',
-    'z': 'A', 'x': 'B', 'a': 'L', 's': 'R', 'Enter': 'START', 'Shift': 'SELECT'
-  };
-  window.addEventListener('keydown', (e) => {
-    if (!Module) return;
-    const k = keyMap[e.key];
-    if (!k) return;
-    if (typeof Module._onKeyDown === 'function') {
-      try { Module._onKeyDown(k); } catch (e) { console.warn(e); }
-    }
-  });
-  window.addEventListener('keyup', (e) => {
-    if (!Module) return;
-    const k = keyMap[e.key];
-    if (!k) return;
-    if (typeof Module._onKeyUp === 'function') {
-      try { Module._onKeyUp(k); } catch (e) { console.warn(e); }
-    }
-  });
-
-  // Kick off a best-effort attempt to preload the emulator glue so the page shows better status early.
+  // Preflight: hint
   (async function preflight() {
-    try {
-      await findAndInstantiateModule();
-      setStatus('Emulator glue detected and initialized (preflight).');
-    } catch (e) {
-      // It's fine if this fails; user can still build and then click Start which will attempt again.
-      setStatus('Emulator glue not present. Build melonDS to WASM and place melonDS.js/.wasm into static/emu/.');
-    }
+    const ok = await exists('static/emu/melonDS.js');
+    if (ok) setStatus('melonDS.js found in static/emu/ — click Start to launch a ROM.');
+    else setStatus('Place melonDS.js and melonDS.wasm in static/emu/ and click Start.');
   })();
 })();
