@@ -23,3 +23,34 @@ If you want, I can also add a GitHub Action to attempt a build; local builds are
 
 
 ---
+
+Emscripten build flags required for loader
+
+To make the frontend automatically instantiate the melonDS WebAssembly module and load the ROM, build melonDS with Emscripten using these flags (or their CMake equivalents):
+
+-s MODULARIZE=1 \
+-s EXPORT_NAME='createMelonDSModule' \
+-s EXPORTED_RUNTIME_METHODS='["FS","callMain","ccall","cwrap"]' \
+-s ALLOW_MEMORY_GROWTH=1 \
+-s ASSERTIONS=1 \
+-s ENVIRONMENT='web' \
+
+Example (emcc link flags):
+
+emcc <object-files> -o melonDS.js \
+  -s MODULARIZE=1 \
+  -s EXPORT_NAME='createMelonDSModule' \
+  -s EXPORTED_RUNTIME_METHODS='["FS","callMain","ccall","cwrap"]' \
+  -s ALLOW_MEMORY_GROWTH=1
+
+Notes:
+- MODULARIZE=1 exports a factory function which our loader calls to instantiate the runtime and provide locateFile.
+- locateFile is used to load melonDS.wasm from `static/emu/` so ensure both files are copied there after building.
+
+Running locally
+1. Build melonDS as above and copy melonDS.js and melonDS.wasm into `static/emu/`.
+2. Start the dev server (`npm run serve`) and open the page.
+3. Load a .nds ROM using the file input and click Start. The loader writes the ROM into the Emscripten FS before runtime starts and calls the emulator entrypoint.
+
+Legal reminder
+- This project does NOT include Nintendo DS BIOS, firmware, or commercial ROMs. You must dump BIOS/ROMs from hardware you own. Running commercial ROMs without owning them is illegal in many jurisdictions.
